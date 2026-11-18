@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 
 namespace Mang_Inasar_ConsoleApp
 {
@@ -400,6 +401,409 @@ namespace Mang_Inasar_ConsoleApp
                     "  [P] Confirm and proceed to payment",
                     "  [X] Cancel order");
                 EndScreen(message);
+            }
+            // =====================================================================
+            //  4. PAYMENT AND RECEIPT
+            // =====================================================================
+
+            static PaymentResult ProcessPayment()
+            {
+                decimal total = CalculateTotal();
+                string message = "";
+
+                while (true)
+                {
+                    ShowPaymentScreen(total, message);
+                    message = "";
+
+                    string input = ReadInput("Enter cash amount");
+
+                    if (input.Equals("X", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ConfirmCancel())
+                        {
+                            return PaymentResult.Cancelled;
+                        }
+                        continue;
+                    }
+
+                    if (input.Equals("B", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return PaymentResult.BackToOrder;
+                    }
+
+                    if (!TryParseCash(input, out decimal cash, out string cashError))
+                    {
+                        message = Error(cashError);
+                        continue;
+                    }
+
+                    if (cash < total)
+                    {
+                        // Rejected attempt: nothing is remembered, the full amount must be re-entered.
+                        message = Error("Cash is not enough. You still need " + FormatMoney(total - cash)
+                                        + ". Enter the full amount again, or X to cancel.");
+                        continue;
+                    }
+
+                    PaidOrder order = BuildOrderFromCart(cash, cash - total);
+
+                    if (SaveWithRetry(order))
+                    {
+                        ShowReceiptScreen(order, "Thank you! Please take your receipt.");
+                        ClearCart();    // ready for the next customer
+                        return PaymentResult.Paid;
+                    }
+
+                    // Saving failed and the customer chose not to retry.
+                    return PaymentResult.BackToOrder;
+                }
+            }
+
+            static void ShowPaymentScreen(decimal total, string message)
+            {
+                BeginScreen();
+                DrawHeader("PAYMENT (CASH)");
+                DrawBlank();
+                DrawRow("Amount due:", FormatMoney(total));
+                DrawBlank();
+                DrawLine(" Enter the cash you are handing over, in pesos");
+                DrawLine(" (up to 2 decimal places, e.g. 300 or 300.50).");
+                DrawBlank();
+                DrawActions("  [B] Back to order        [X] Cancel order");
+                EndScreen(message);
+            }
+
+            /// <summary>
+            /// Tries to save the order. On failure shows the error and lets the user retry
+            /// or go back to the order. Returns true only when the order was saved.
+            /// A failed attempt writes nothing, so a retry cannot create duplicate records.
+            /// </summary>
+            static bool SaveWithRetry(PaidOrder order)
+            {
+                while (true)
+                {
+                    if (TrySaveOrder(order, out string saveError))
+                    {
+                        return true;
+                    }
+
+                    ShowSaveFailedScreen(saveError);
+
+                    while (true)
+                    {
+                        string choice = ReadInput("Enter your choice").ToUpperInvariant();
+
+                        if (choice == "R")
+                        {
+                            break;      // outer loop tries to save again
+                        }
+                        if (choice == "B")
+                        {
+                            return false;
+                        }
+                        Console.WriteLine(Error("Invalid choice. Enter R or B."));
+                    }
+                }
+            }
+
+            static void ShowSaveFailedScreen(string saveError)
+            {
+                BeginScreen();
+                DrawHeader("! PAYMENT NOT COMPLETED");
+                DrawLine(" The order could NOT be saved, so the sale was not recorded.");
+                DrawLine(" Reason: " + Fit(saveError, 50));
+                DrawBlank();
+                DrawLine("  [R] Retry saving");
+                DrawLine("  [B] Back to order (nothing was saved)");
+                EndScreen();
+            }
+
+            /// <summary>Builds a PAID order from the current cart.</summary>
+            static PaidOrder BuildOrderFromCart(decimal cash, decimal change)
+            {
+                PaidOrder order = new PaidOrder();
+
+                for (int i = 0; i < menuNames.Length; i++)
+                {
+                    if (cartQuantities[i] > 0)
+                    {
+                        order.ItemNames.Add(menuNames[i]);
+                        order.UnitPrices.Add(menuPrices[i]);
+                        order.Quantities.Add(cartQuantities[i]);
+                        order.Subtotals.Add(CalculateSubtotal(menuPrices[i], cartQuantities[i]));
+                    }
+                }
+
+                order.Total = CalculateTotal();
+                order.Cash = cash;
+                order.Change = change;
+                return order;
+            }
+
+            static void ShowReceiptScreen(PaidOrder order, string footer)
+            {
+                BeginScreen();
+                DrawBanner(RestaurantName, "OFFICIAL RECEIPT");
+                DrawRow("Order ID: " + order.OrderId, "Status: " + order.Status);
+                DrawDivider();
+                DrawOrderTable(order);
+                DrawRow("TOTAL", FormatMoney(order.Total));
+                DrawRow("CASH", FormatMoney(order.Cash));
+                DrawRow("CHANGE", FormatMoney(order.Change));
+                DrawDivider();
+                DrawCentered(footer);
+                EndScreen();
+                Pause();
+            }
+
+            // =====================================================================
+            //  5. CASHIER VIEW
+            // =====================================================================
+
+            /// <summary>
+            /// Asks for the cashier username and password (up to MaxLoginAttempts tries).
+            /// Returns true only when both match exactly (case-sensitive).
+            /// </summary>
+            static bool CashierLogin()
+            {
+                string message = "";
+
+                for (int attempt = 1; attempt <= MaxLoginAttempts; attempt++)
+                {
+                    ShowLoginScreen(attempt, message);
+                    message = "";
+
+                    string username = ReadInput("Username");
+
+                    if (username.Equals("B", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
+                    string password = ReadPassword("Password");
+
+                    if (username == CashierUsername && password == CashierPassword)
+                    {
+                        return true;
+                    }
+
+                    message = Error("Incorrect username or password.");
+                }
+
+                ShowMessageBox("Too many failed attempts. Returning to the main menu.");
+                return false;
+            }
+
+            static void ShowLoginScreen(int attempt, string message)
+            {
+                BeginScreen();
+                DrawHeader("CASHIER LOGIN");
+                DrawBlank();
+                DrawLine(" Enter your username and password to continue.");
+                DrawBlank();
+                DrawActions("  Attempt " + attempt + " of " + MaxLoginAttempts + "      (type B as username to go back)");
+                EndScreen(message);
+            }
+
+            static void RunCashierView()
+            {
+                bool inCashierView = true;
+                string message = "";
+
+                while (inCashierView)
+                {
+                    ShowCashierMenu(message);
+                    message = "";
+
+                    string choice = ReadInput("Enter your choice").ToUpperInvariant();
+
+                    switch (choice)
+                    {
+                        case "1":
+                            FindOrder();
+                            break;
+                        case "2":
+                            ShowSales();
+                            break;
+                        case "B":
+                            inCashierView = false;
+                            break;
+                        default:
+                            message = Error("Invalid choice. Enter 1, 2 or B.");
+                            break;
+                    }
+                }
+            }
+
+            static void ShowCashierMenu(string message)
+            {
+                BeginScreen();
+                DrawHeader("CASHIER VIEW");
+                DrawOptions(
+                    "   [1]  Find an order by Order ID",
+                    "   [2]  View sales report",
+                    "   [B]  Back to main menu");
+                EndScreen(message);
+            }
+
+            static void FindOrder()
+            {
+                string message = "";
+
+                while (true)
+                {
+                    ShowFindOrderScreen(message);
+                    message = "";
+
+                    string input = ReadInput("Enter Order ID").ToUpperInvariant();
+
+                    if (input == "B")
+                    {
+                        return;
+                    }
+
+                    if (input.Length == 0)
+                    {
+                        message = Error("Order ID cannot be blank. Example: ORD0001.");
+                        continue;
+                    }
+
+                    if (!TryLoadOrders(out List<PaidOrder> orders, out _, out string loadError))
+                    {
+                        message = Error("Could not read the records: " + loadError);
+                        continue;
+                    }
+
+                    PaidOrder found = FindOrderById(orders, input);
+
+                    if (found == null)
+                    {
+                        message = Error("Order not found: " + Fit(input, 30));
+                        continue;
+                    }
+
+                    ShowReceiptScreen(found, "Saved record (read from file)");
+                }
+            }
+
+            static void ShowFindOrderScreen(string message)
+            {
+                BeginScreen();
+                DrawHeader("FIND ORDER");
+                DrawBlank();
+                DrawLine(" Type an Order ID such as ORD0001 (not case-sensitive).");
+                DrawBlank();
+                DrawActions("  [B] Back to cashier menu");
+                EndScreen(message);
+            }
+
+            /// <summary>Returns the order with the given ID, or null when there is none.</summary>
+            static PaidOrder FindOrderById(List<PaidOrder> orders, string orderId)
+            {
+                foreach (PaidOrder order in orders)
+                {
+                    if (order.OrderId.Equals(orderId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return order;
+                    }
+                }
+                return null;
+            }
+
+            static void ShowSales()
+            {
+                BeginScreen();
+                DrawHeader("SALES REPORT");
+                DrawBlank();
+
+                if (!TryLoadOrders(out List<PaidOrder> orders, out int skipped, out string loadError))
+                {
+                    DrawLine(" ! Could not read the records:");
+                    DrawLine("   " + Fit(loadError, 56));
+                    DrawBlank();
+                    EndScreen();
+                    Pause();
+                    return;
+                }
+
+                // Sales = sum of order totals (not cash or change).
+                decimal totalSales = 0m;
+                foreach (PaidOrder order in orders)
+                {
+                    totalSales += order.Total;
+                }
+
+                DrawRow("Completed orders:", orders.Count.ToString(CultureInfo.InvariantCulture));
+                DrawRow("Total sales:", FormatMoney(totalSales));
+                DrawBlank();
+
+                if (orders.Count == 0)
+                {
+                    DrawCentered("No sales yet");
+                    DrawBlank();
+                }
+
+                if (skipped > 0)
+                {
+                    DrawLine(" Note: " + skipped + " unreadable line(s) in the file were skipped.");
+                    DrawBlank();
+                }
+
+                EndScreen();
+                Pause();
+            }
+
+            // =====================================================================
+            //  6. SAVING AND LOADING THE CSV FILE
+            // =====================================================================
+
+            /// <summary>Assigns the next Order ID and appends the order to the CSV file.</summary>
+            static bool TrySaveOrder(PaidOrder order, out string error)
+            {
+                error = "";
+
+                try
+                {
+                    string directory = Path.GetDirectoryName(RecordsFilePath);
+                    if (!string.IsNullOrEmpty(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+
+                    order.OrderId = GetNextOrderId();
+
+                    StringBuilder text = new StringBuilder();
+
+                    // Write the header only when the file is new or empty.
+                    if (!File.Exists(RecordsFilePath) || new FileInfo(RecordsFilePath).Length == 0)
+                    {
+                        text.AppendLine(CsvHeader);
+                    }
+
+                    for (int i = 0; i < order.ItemNames.Count; i++)
+                    {
+                        text.AppendLine(string.Join(",",
+                            order.OrderId,
+                            order.Status,
+                            order.ItemNames[i],
+                            ToCsvMoney(order.UnitPrices[i]),
+                            order.Quantities[i].ToString(CultureInfo.InvariantCulture),
+                            ToCsvMoney(order.Subtotals[i]),
+                            ToCsvMoney(order.Total),
+                            ToCsvMoney(order.Cash),
+                            ToCsvMoney(order.Change)));
+                    }
+
+                    // One append call writes the whole order and closes the file handle.
+                    File.AppendAllText(RecordsFilePath, text.ToString(), Encoding.UTF8);
+                    return true;
+                }
+                catch (Exception ex) when (IsFileError(ex))
+                {
+                    error = ex.Message;
+                    return false;
+                }
             }
         }
     }

@@ -805,6 +805,101 @@ namespace Mang_Inasar_ConsoleApp
                     return false;
                 }
             }
+            static string GetNextOrderId()
+            {
+                int highest = 0;
+
+                if (File.Exists(RecordsFilePath))
+                {
+                    foreach (string line in File.ReadAllLines(RecordsFilePath))
+                    {
+                        string id = line.Split(',')[0].Trim().ToUpperInvariant();
+
+                        if (id.StartsWith("ORD")
+                            && int.TryParse(id.Substring(3), NumberStyles.None, CultureInfo.InvariantCulture, out int number)
+                            && number > highest)
+                        {
+                            highest = number;
+                        }
+                    }
+                }
+
+                return "ORD" + (highest + 1).ToString("D4", CultureInfo.InvariantCulture);
+            }
+
+            /// <summary>
+            /// Reads every PAID record from the CSV file. A missing file is not an error
+            /// (it simply means no sales yet). Rows with the same Order ID form one order.
+            /// </summary>
+            static bool TryLoadOrders(out List<PaidOrder> orders, out int skippedLines, out string error)
+            {
+                orders = new List<PaidOrder>();
+                skippedLines = 0;
+                error = "";
+
+                try
+                {
+                    if (!File.Exists(RecordsFilePath))
+                    {
+                        return true;
+                    }
+
+                    foreach (string line in File.ReadAllLines(RecordsFilePath))
+                    {
+                        if (string.IsNullOrWhiteSpace(line) || line.Trim() == CsvHeader)
+                        {
+                            continue;
+                        }
+
+                        string[] parts = line.Split(',');
+
+                        if (parts.Length != 9
+                            || !TryParseCsvMoney(parts[3], out decimal unitPrice)
+                            || !int.TryParse(parts[4], NumberStyles.None, CultureInfo.InvariantCulture, out int quantity)
+                            || !TryParseCsvMoney(parts[5], out decimal subtotal)
+                            || !TryParseCsvMoney(parts[6], out decimal total)
+                            || !TryParseCsvMoney(parts[7], out decimal cash)
+                            || !TryParseCsvMoney(parts[8], out decimal change))
+                        {
+                            skippedLines++;
+                            continue;
+                        }
+
+                        string status = parts[1].Trim().ToUpperInvariant();
+                        if (status != "PAID")
+                        {
+                            continue;       // only PAID records count
+                        }
+
+                        string orderId = parts[0].Trim().ToUpperInvariant();
+                        PaidOrder order = FindOrderById(orders, orderId);
+
+                        if (order == null)
+                        {
+                            order = new PaidOrder();
+                            order.OrderId = orderId;
+                            order.Status = status;
+                            order.Total = total;
+                            order.Cash = cash;
+                            order.Change = change;
+                            orders.Add(order);
+                        }
+
+                        order.ItemNames.Add(parts[2].Trim());
+                        order.UnitPrices.Add(unitPrice);
+                        order.Quantities.Add(quantity);
+                        order.Subtotals.Add(subtotal);
+                    }
+
+                    return true;
+                }
+                catch (Exception ex) when (IsFileError(ex))
+                {
+                    orders = new List<PaidOrder>();
+                    error = ex.Message;
+                    return false;
+                }
+            }
         }
     }
 }
